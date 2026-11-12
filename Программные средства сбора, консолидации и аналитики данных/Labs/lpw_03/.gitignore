@@ -1,0 +1,9 @@
+kaggle.json
+**/.kaggle/
+.env
+dags/data/
+logs/
+__pycache__/
+*.pyc
+.test-postgres/
+.docker-config/

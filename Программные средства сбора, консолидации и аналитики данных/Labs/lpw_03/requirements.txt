@@ -1,0 +1,10 @@
+# Compatible with Airflow 2.5.0 / Python 3.8. Do not upgrade SQLAlchemy to 2.x.
+apache-airflow==2.5.0
+# Also checked against constraints-2.5.0/constraints-3.8.txt.
+apache-airflow-providers-postgres==5.3.1
+pandas==1.5.2
+numpy==1.22.4
+SQLAlchemy==1.4.44
+psycopg2-binary==2.9.9
+kaggle==1.5.16
+kagglehub==0.2.9

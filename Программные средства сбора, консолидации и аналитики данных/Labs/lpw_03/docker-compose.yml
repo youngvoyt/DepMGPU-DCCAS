@@ -1,0 +1,136 @@
+name: happiness_lab09
+
+x-airflow: &airflow
+  build: .
+  user: "${AIRFLOW_UID:-50000}:0"
+  environment: &airflow-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres:5432/airflow
+    AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+    AIRFLOW__CORE__LOAD_DEFAULT_CONNECTIONS: 'false'
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+    AIRFLOW__WEBSERVER__SECRET_KEY: lab09-airflow-local-secret
+    AIRFLOW__CORE__FERNET_KEY: ''
+    AIRFLOW__WEBSERVER__EXPOSE_CONFIG: 'false'
+    AIRFLOW__CORE__TEST_CONNECTION: Enabled
+    DATA_SOURCE: ${DATA_SOURCE:-kaggle}
+    KAGGLE_CONFIG_DIR: /home/airflow/.kaggle
+    KAGGLEHUB_CACHE: /opt/airflow/dags/data/kaggle-cache
+  volumes:
+    - ./dags:/opt/airflow/dags
+    - ./input:/opt/airflow/input:ro
+    # kagglehub 0.2.9 writes its own logs under ~/.kaggle/logs.
+    - ./dags/.kaggle:/home/airflow/.kaggle
+    - logs:/opt/airflow/logs
+
+services:
+  postgres:
+    image: postgres:12-alpine
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    ports: ['127.0.0.1:5432:5432']
+    volumes: [postgres_data:/var/lib/postgresql/data]
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U airflow -d airflow']
+      interval: 5s
+      retries: 30
+
+  analytics_postgres:
+    image: postgres:12-alpine
+    environment:
+      POSTGRES_USER: analytics
+      POSTGRES_PASSWORD: analytics
+      POSTGRES_DB: analytics
+    ports: ['127.0.0.1:5433:5432']
+    volumes: [analytics_postgres_data:/var/lib/postgresql/data]
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U analytics -d analytics']
+      interval: 5s
+      retries: 30
+
+  redis:
+    image: redis:7-alpine
+    ports: ['127.0.0.1:6379:6379']
+
+  init:
+    <<: *airflow
+    depends_on:
+      postgres: {condition: service_healthy}
+      analytics_postgres: {condition: service_healthy}
+    command:
+      - bash
+      - -ec
+      - |
+        airflow db upgrade
+        if ! airflow users list --output json | python -c 'import json,sys; sys.exit(not any(u["username"]=="admin" for u in json.load(sys.stdin)))'; then
+          airflow users create --username admin --password admin --firstname Ivan --lastname Voit --role Admin --email admin@example.org
+        fi
+        if ! airflow connections get analytics_postgres >/dev/null 2>&1; then
+          airflow connections add analytics_postgres --conn-uri 'postgresql://analytics:analytics@analytics_postgres:5432/analytics'
+        fi
+
+  webserver:
+    <<: *airflow
+    restart: unless-stopped
+    depends_on:
+      init: {condition: service_completed_successfully}
+    ports: ['127.0.0.1:8080:8080']
+    command: webserver
+
+  scheduler:
+    <<: *airflow
+    restart: unless-stopped
+    depends_on:
+      init: {condition: service_completed_successfully}
+    command: scheduler
+
+  superset:
+    build: {context: ., dockerfile: superset.Dockerfile}
+    restart: unless-stopped
+    environment: &superset-env
+      SUPERSET_CONFIG_PATH: /app/project/superset_config.py
+      SUPERSET_SECRET_KEY: ${SUPERSET_SECRET_KEY:-local-lab09-only-change-before-network-exposure-8e612abd9574}
+    ports: ['127.0.0.1:8088:8088']
+    volumes:
+      - superset_data:/app/superset_home
+      - ./superset:/app/project
+    depends_on:
+      analytics_postgres: {condition: service_healthy}
+      redis: {condition: service_started}
+    command:
+      - /bin/bash
+      - -ec
+      - |
+        superset db upgrade
+        python /app/project/create_admin.py
+        superset init
+        gunicorn --bind 0.0.0.0:8088 --workers 2 --timeout 120 'superset.app:create_app()'
+
+  dashboard-init:
+    build: {context: ., dockerfile: superset.Dockerfile}
+    environment: *superset-env
+    volumes: [./superset:/app/project]
+    depends_on:
+      superset: {condition: service_started}
+    command: ['python', '/app/project/bootstrap_dashboard.py']
+
+  pgadmin:
+    image: dpage/pgadmin4:8.14
+    ports: ['127.0.0.1:5050:80']
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@admin.com
+      PGADMIN_DEFAULT_PASSWORD: admin
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+      - ./pgadmin/servers.json:/pgadmin4/servers.json:ro
+    depends_on:
+      analytics_postgres: {condition: service_healthy}
+
+volumes:
+  logs:
+  postgres_data:
+  analytics_postgres_data:
+  superset_data:
+  pgadmin_data:
